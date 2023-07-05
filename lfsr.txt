@@ -1,0 +1,626 @@
+; multi-segment executable file template.
+
+data segment
+    lfsr1 db 3 dup(0)
+    lfsr2 db 3 dup(0)
+    lfsr3 db 3 dup(0) 
+    key   db 12h,23h,45h,67h,89h,0ABh,0CDh,0EFh
+    frame db 3 dup(00h)
+    keystream db 15 dup(0)
+    message db 1000 dup(?)
+    bit_on_message dw ?
+    loop_counter dw ?
+    num_of_frame dw ?
+    num_of_bytes_from_user dw ?
+    user_friendly_input db "Please give the message you want to encrypt:$"
+    user_friendly_output db "This is the encrypted message:$"
+    
+ends
+
+stack segment
+    dw   128  dup(0)
+ends
+
+code segment
+
+; bx - address to print from
+; cx - number of bytes to print
+;function to print bytes as hex
+proc print_bytes
+    push ax
+    push dx
+    push si
+    
+    mov si, cx
+    dec si
+    print_byte:
+    mov dl, [bx+si]
+        shr dl, 4 ; 4 top bits
+        cmp dl, 10
+        jl digit2
+        add dl, 55
+        jmp letter2
+        digit2:
+        add dl, 48
+        letter2:
+        mov ah, 2
+        int 21h
+        
+        mov dl, [bx+si]
+        and dl, 0Fh ; 4 bottom bits
+        cmp dl, 10
+        jl digit1
+        add dl, 55
+        jmp letter1
+        digit1:
+        add dl, 48
+        letter1:
+        mov ah, 2
+        int 21h
+        
+        dec si
+        cmp si, -1
+        jg print_byte      
+    
+    mov dl, 10
+    int 21h
+    mov dl, 13
+    int 21h
+    
+    pop si
+    pop dx
+    pop ax
+    ret 
+endp
+; function to step irregular clock by majority vote
+proc irregular_clock
+    push ax
+    push bx
+    
+    ;
+    ; determine if majority is 0 or 1 by adding the 3 clock
+    ; bits and checking if the result is greater than 1 (majority is 1)
+    ; or less than / equal to 1 (majority is 0)
+    ;
+    mov al, [lfsr1+1] ; clock bit is in 2nd byte
+    and al, 1 ; zero all bits except for the LSB (the clock bit)
+    
+    mov ah, [lfsr2+1]
+    shr ah, 2 ; move clock bit to the LSB position              
+    and ah, 1
+    
+    mov bl, [lfsr3+1]
+    shr bl, 2
+    and bl, 1
+              
+    ; al - lfsr1 clock bit
+    ; ah - lfsr2 clock bit
+    ; bl - lfsr3 clock bit
+    ; bh - sum of bits
+    mov bh, al
+    add bh, ah
+    add bh, bl        
+    
+    ; put in bh the majority (0 or 1)
+    cmp bh, 1
+    jg majority_1
+    xor bh, bh
+    jmp majority_0
+    majority_1:
+    mov bh, 1
+    majority_0:
+    
+    ;
+    ; clock lfsr if its clock bit = majority
+    ;
+    cmp al, bh
+    jne skip_lfsr1
+    call clock_lfsr1
+    skip_lfsr1:
+    
+    cmp ah, bh
+    jne skip_lfsr2
+    call clock_lfsr2
+    skip_lfsr2:
+    
+    cmp bl, bh
+    jne skip_lfsr3
+    call clock_lfsr3
+    skip_lfsr3:
+                 
+    pop bx
+    pop ax                
+    ret
+endp irregular_clock
+
+proc clock_lfsr1
+    push ax
+    push bx
+    push cx
+     
+    xor cx, cx
+    mov al, [lfsr1+1] ; 2nd byte (where the first tap is)
+    and al, 20h ; check if 6th bit of 2nd byte is 0 or 1 and save result in bx
+    cmp al, 0
+    je tap11_zero
+    mov cl, 1
+    jmp tap11_one
+    tap11_zero:
+    mov cl, 0
+    tap11_one:
+    
+    mov al, [lfsr1+2] ; tap number 2. in 3rd byte
+    and al, 01h ; 1st bit of 3rd byte
+    cmp al, 0
+    je tap12_zero
+    xor cl, 1
+    jmp tap12_one
+    tap12_zero:
+    xor cl, 0      
+    tap12_one:
+    
+    mov al, [lfsr1+2] ; tap number 3
+    and al, 02h ; 2nd bit of 3rd byte
+    cmp al, 0
+    je tap13_zero
+    xor cl, 1
+    jmp tap13_one
+    tap13_zero:
+    xor cl, 0
+    tap13_one:
+    
+    mov al, [lfsr1+2] ; tap number 4
+    and al, 04h ; 3rd bit of 3rd byte
+    cmp al, 0
+    je tap14_zero
+    xor cl, 1
+    jmp tap14_one
+    tap14_zero:
+    xor cl, 0
+    tap14_one:                                                             
+    
+    lea bx, lfsr1
+    call shift_lfsr
+    
+    or [lfsr1], cl ; put the xor of the taps into the LSB of the register
+    
+    pop cx
+    pop bx
+    pop ax
+    ret
+endp clock_lfsr1
+
+proc clock_lfsr2
+    push ax
+    push bx
+    push cx
+    
+    xor cx, cx
+    mov al, [lfsr2+2]
+    and al, 10h ; tap 1
+    cmp al, 0
+    je tap21_zero
+    mov cl, 1
+    jmp tap21_one
+    tap21_zero:
+    mov cl, 0
+    tap21_one:
+    
+    mov al, [lfsr2+2]
+    and al, 20h ; tap 2
+    cmp al, 0
+    je tap22_zero
+    xor cl, 1
+    jmp tap22_one
+    tap22_zero:
+    xor cl, 0      
+    tap22_one:
+    
+    lea bx, lfsr2
+    call shift_lfsr
+    
+    or [lfsr2], cl ; put the xor of the taps into the LSB of the register
+    
+    pop cx
+    pop bx
+    pop ax
+    ret
+endp clock_lfsr2
+
+proc clock_lfsr3
+    push ax
+    push bx
+    push cx
+    
+    xor cx, cx
+    mov al, [lfsr3+0]
+    and al, 80h
+    cmp al, 0
+    je tap31_zero
+    mov cl, 1
+    jmp tap31_one
+    tap31_zero:
+    mov cl, 0
+    tap31_one:
+    
+    mov al, [lfsr3+2]
+    and al, 10h
+    cmp al, 0
+    je tap32_zero
+    xor cl, 1
+    jmp tap32_one
+    tap32_zero:
+    xor cl, 0      
+    tap32_one:
+    
+    mov al, [lfsr3+2]
+    and al, 20h
+    cmp al, 0
+    je tap33_zero
+    xor cl, 1
+    jmp tap33_one
+    tap33_zero:
+    xor cl, 0
+    tap33_one:
+    
+    mov al, [lfsr3+2]
+    and al, 40h
+    cmp al, 0
+    je tap34_zero
+    xor cl, 1
+    jmp tap34_one
+    tap34_zero:
+    xor cl, 0
+    tap34_one:
+    
+    lea bx, lfsr3
+    call shift_lfsr
+    
+    or [lfsr3], cl ; put the xor of the taps into the LSB of the register
+    
+    pop cx
+    pop bx
+    pop ax
+    ret    
+endp clock_lfsr3
+
+; bl - the bit to xor
+proc clock_and_xor_bit
+    call clock_lfsr1
+    call clock_lfsr2
+    call clock_lfsr3
+    xor [lfsr1], bl
+    xor [lfsr2], bl
+    xor [lfsr3], bl
+    
+    ret
+endp clock_and_xor_bi
+; shift regrster left               
+; bx - address of lsfr to shift
+proc shift_lfsr
+    push ax
+    push cx
+    
+    xor ax, ax ; will store the carry between bytes 1 and 2
+    xor cx, cx ; store carry between bytes 2 and 3
+    shl [bx+0], 1 ; shift 1st byte
+    jnc shift2
+    mov ax, 1 ; save carry to put in next byte 
+    shift2:
+    shl [bx+1], 1 ; shift 2nd byte
+    jnc carry2_off
+    mov cx, 1
+    carry2_off:
+    cmp ax, 0
+    je shift1_no_carry
+    or [bx+1], 1 ; turn on LSB of 2nd byte, since MSB of 1st byte was 1
+    shift1_no_carry: 
+    shl [bx+2], 1 ; shift 3rd byte
+    cmp cx, 0
+    je done
+    or [bx+2], 1 ; turn on LSB of 3rd byte, since MSB of 2nd byte was 1
+      
+    done:
+    pop cx
+    pop ax  
+    ret
+endp shift_lfsr
+    
+
+start:
+; set segment registers:
+    mov ah, 9h
+    int 21h
+    mov dl, 10
+    mov ah, 2
+    int 21h
+    mov dl, 13
+    mov ah, 2
+    int 21h
+    mov ax, data
+    mov ds, ax
+    mov es, ax
+    mov dx, offset user_friendly_input
+    mov ah, 9h
+    int 21h
+    mov dl, 10
+    mov ah, 2
+    int 21h
+    mov dl, 13
+    mov ah, 2
+    int 21h
+    mov ah, 9h
+    int 21h
+    mov dl, 10
+    mov ah, 2
+    int 21h
+    mov dl, 13
+    mov ah, 2
+    int 21h
+    
+    ;           
+    ; get message from user
+    ;
+    xor si, si
+    mov ah, 1
+    
+    ; the first 14 bytes are inserted normally
+    input_first_14:
+       int 21h ; get char from user
+    
+       cmp al, 0Dh ; finish on enter
+       je input_finished
+             
+       mov [message+si], al
+                        
+       inc si                        
+       cmp si, 14
+       jl input_first_14
+    
+    ; 15th byte special case - put 2 bits from the next char
+    ; in it and save the remaining 6 in bl
+    int 21h ; the 15th char
+    cmp al, 0Dh
+    je input_finished
+    mov bl, al
+    and al, 00000011b
+    mov [message+14], al
+    shr bl, 2           
+    inc si
+    
+    ; from the 16th byte - put the saved 6 bits first,
+    ; then add 2 more bits and save the remaining 6 for the next byte
+    get_next_char:
+        int 21h
+        
+        cmp al, 0Dh
+        je input_finished
+        
+        mov [message+si], 0
+        mov [message+si], bl ; saved 6 bits
+        mov bl, al
+        shr bl, 2 ; save 6 bits for next byte
+        and al, 00000011b
+        shl al, 6
+        or [message+si], al ; put the 2 bits of the new char
+        
+        inc si
+        jmp get_next_char ; unconditional jump - will exit this loop when user inputs 'enter'
+        
+        
+    
+    input_finished:
+    
+    cmp si, 14
+    jl start_step2 ; if only 14 or less bytes were used for the message then there's no saved leftover in bl
+    mov [message+si], bl
+    inc si
+    
+    
+    
+    start_step2:
+    mov dx, 0
+    mov ax, si
+    mov [num_of_bytes_from_user],si
+    mov cx, 15
+    div cx
+    cmp dx, 0
+    jg inc_ax
+    jmp no
+    inc_ax:
+    inc ax
+    no:
+    mov [loop_counter], 0
+    mov [num_of_frame], ax
+    
+    times_to_run:
+    ; step 2 - clocking LFSRs with session key
+    ; loop 8 times, each time use the next byte of the key
+    xor si, si
+    xor bx, bx
+    next_key_byte:
+        mov al, [key + si]
+        
+        ; take one bit from the key each time
+        mov cx, 8
+        next_key_bit:
+            shr al, 1
+            jc key_bit_on
+            mov bl, 0    
+            jmp key_bit_off
+            key_bit_on:
+            mov bl, 1
+            key_bit_off:
+            call clock_and_xor_bit
+            loop next_key_bit
+            
+        inc si
+        cmp si, 8
+        jl next_key_byte
+        
+        
+ 
+    
+    ; step 3 - clocking with frame counter
+    xor ax, ax
+    xor si, si         
+    next_frame_byte:
+        mov al, [frame + si]
+        mov cx, 8
+        next_frame_bit:
+            cmp si, 2
+            je skip_last_two            
+            continue:       
+            shr al, 1
+            jc frame_bit_on
+            mov bl, 0
+            jmp frame_bit_off
+            frame_bit_on:
+            mov bl, 1
+            frame_bit_off:
+            call clock_and_xor_bit
+            jmp next
+            skip_last_two:
+            cmp cx, 2   
+            jg continue
+            next:
+            loop next_frame_bit
+            
+        inc si
+        cmp si, 3
+        jl next_frame_byte
+    
+
+    ; step 4 - 100 irregular clocks
+    mov cx, 100
+    step4_loop:
+        call irregular_clock
+        loop step4_loop  
+                        
+   ; print registers
+    and [lfsr1+2], 00000111b    
+    lea bx, lfsr1
+    mov cx, 3
+    call print_bytes
+    
+    and [lfsr2+2], 00111111b    
+    lea bx, lfsr2
+    mov cx, 3
+    call print_bytes
+    
+    and [lfsr3+2], 01111111b    
+    lea bx, lfsr3
+    mov cx, 3
+    call print_bytes
+    
+    ;    
+    ; step 5 - 114 irregular clocks,
+    ; and adding the xor of the three MSB to the key stream
+    ; after each one
+    ;
+    xor si, si
+    step5_loop:
+        xor cl, cl
+        keystream_byte_loop:
+            call irregular_clock
+            
+            ; lfsr1 MSB
+            mov ah, [lfsr1+2]
+            shr ah, 2
+            and ah, 1
+            
+            ; lfsr2 MSB
+            mov bl, [lfsr2+2]
+            shr bl, 5
+            and bl, 1
+            
+            xor ah, bl
+            
+            ; lfsr3 MSB
+            mov bl, [lfsr3+2]
+            shr bl, 6
+            and bl, 1
+            
+            xor ah, bl ; now next keystream bit is in ah
+            shl ah, cl
+            xor [keystream+si], ah
+            
+            inc cl
+            cmp cl, 8
+            jl keystream_byte_loop
+        
+        inc si
+        cmp si, 15
+        jl step5_loop
+    ;step 6 encypr the frame using the key stream      
+    mov si, 0
+    mov ax, [loop_counter]
+    mov cx, 15
+    mul cx
+    mov bx, ax 
+    
+    and [keystream+14], 00000011b; key stream needs only 114 bits, this is why i zero the 6 top bits of the 15 byte 
+    
+    xor_loop_run: ;xor the prand with the plaintext and puting the ciphertext in message 
+    
+    mov dl, [keystream +si] 
+    xor [message + bx], dl 
+    
+    inc bx
+    inc si
+    cmp si, 15
+    jl xor_loop_run
+    
+    ;
+    ;inc frame counter, becouse it saving three bytes 
+    ;
+    inc [frame]
+    cmp [frame], 0
+    je frame_counter_sec
+    jmp reg
+    frame_counter_sec: ;if in byte index zero all bits 1, inc byte index 1 
+    inc [frame+1]
+    cmp [frame+1], 0
+    je frame_counter_th
+    jmp reg
+    frame_counter_th:
+    inc [frame +2]
+    cmp [frame +2], 01000000b  ; frame only go to 2^22 -1 so if reached max value zero all the bits
+    je rest_frame
+    jmp reg
+    rest_frame:
+    mov [frame], 0
+    mov [frame+1], 0
+    mov [frame+2], 0
+    reg:
+    
+    
+    lea bx, keystream
+    mov cx, 15
+    ; print key stream
+    call print_bytes 
+    
+    
+    
+    inc [loop_counter]
+    mov ax, [loop_counter]
+    cmp ax, [num_of_frame]
+    jl times_to_run ; loop 
+    
+    
+    
+    
+ 
+    lea bx, message
+    mov cx, [num_of_bytes_from_user]
+    call print_bytes
+    
+    
+    
+    
+    
+    mov ax, 4c00h ; exit to operating system.
+    int 21h    
+ends
+
+end start ; set entry point and stop the assembler.
